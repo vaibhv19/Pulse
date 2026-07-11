@@ -1,0 +1,12 @@
+Pulse — Feature List
+PROJECT NAME: Pulse (Performance & Load Testing Framework)
+Stack: k6 + Grafana + InfluxDB + GitHub Actions
+Target: Phoenix / Trajectory APIs
+Core Differentiator: Performance & Resilience Testing
+
+Load test scripts simulating concurrent users hitting key API endpoints
+Threshold-based pass/fail gates in CI (e.g. p95 latency must stay under a defined limit) — a build can fail on performance, not just broken functionality
+Stress testing to find the actual breaking point (max concurrent load before failure)
+Grafana dashboard visualizing latency percentiles, throughput, and error rate over time
+Distinct failure mode from Aegis: proves the system holds up under load, not just that it behaves correctly
+
