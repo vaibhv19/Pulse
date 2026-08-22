@@ -33,6 +33,7 @@ services:
     container_name: pulse-k6
     volumes:
       - ../k6:/k6
+    working_dir: /k6
     environment:
       - PULSE_ENV=local
       - PULSE_TARGET=phoenix

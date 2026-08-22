@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate-k6:
-    name: Validate k6 Scripts
+    name: Validate k6 Scripts & Performance Gates
     runs-on: ubuntu-latest
 
     steps:
@@ -19,6 +19,19 @@ jobs:
         uses: grafana/k6-action@v2
         with:
           filename: k6/main.js
+          # Dry run of the core load scenario to validate scripts and budget gates resolution
           flags: --vus 1 --duration 1s
         env:
           PULSE_ENV: local
+          PULSE_TARGET: phoenix
+          PULSE_SCENARIO: load
+
+      - name: Archive Performance Summary Reports
+        uses: actions/upload-artifact@v4
+        if: always() # Preserve logs and diagnostics even on budget violations
+        with:
+          name: pulse-performance-summary
+          path: |
+            summary.json
+            summary.txt
+          retention-days: 5
