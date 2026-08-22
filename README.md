@@ -25,15 +25,16 @@ Pulse/
 │   ├── config/
 │   │   ├── loader.js            # Environment & Target config loader (resolves overrides)
 │   │   ├── targets.js           # API Target Registry (supported systems, endpoints, test data)
-│   │   ├── local.json           # Local load profile configuration
-│   │   ├── development.json     # Dev load profile configuration
-│   │   ├── staging.json         # Staging load profile configuration
-│   │   └── production-like.json # Production-like load profile configuration
+│   │   ├── local.json           # Local load profile configuration (VUs, durations)
+│   │   ├── development.json     # Dev load profile configuration (VUs, durations)
+│   │   ├── staging.json         # Staging load profile configuration (VUs, durations)
+│   │   └── production-like.json # Production-like load profile configuration (VUs, durations)
 │   ├── lib/
 │   │   └── utils.js             # Reusable helper utilities
 │   ├── scripts/
-│   │   └── smoke_test.js        # Basic test scenario executing GET request from registry
-│   └── main.js                  # Main entrypoint and scenario runner definition
+│   │   ├── smoke_test.js        # Smoke test scenario (single target GET request)
+│   │   └── load_test.js         # Core load test scenario (multi-endpoint ramping concurrent run)
+│   └── main.js                  # Main entrypoint and scenario selector options
 └── README.md                    # Developer guide (this file)
 ```
 
@@ -53,14 +54,17 @@ No local installation of Go or k6 is required, as all tools run inside Docker co
 ## Configuration and Targeting Strategy
 
 Pulse uses an environment-aware target configuration strategy. To resolve the final configuration, the system combines:
-1. **Target Selection (`PULSE_TARGET`)**: Defines the API to target (e.g. `phoenix` or `trajectory`).
-2. **Environment Selection (`PULSE_ENV`)**: Defines the target environment profile (e.g. `local`, `development`, `staging`, `production-like`).
+1. **Target Selection (`PULSE_TARGET`)**: Defines the API to target (e.g., `phoenix` or `trajectory`).
+2. **Environment Selection (`PULSE_ENV`)**: Defines the target environment profile (e.g., `local`, `development`, `staging`, `production-like`).
+3. **Scenario Selection (`PULSE_SCENARIO`)**: Defines the scenario profile to execute:
+   - `load` (Default) — Ramping-VU concurrent load test
+   - `smoke` — Light constant-VU smoke validation
 
 ### Precedence Resolution Rules
 
 When a scenario is launched, configuration parameters are resolved in this strict order:
-1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, `duration: '5s'`, `apiVersion: 'v1'`).
-2. **Environment Load Profile**: Loads load parameters (e.g. `vus` and `duration` thresholds) from environment profile files (`k6/config/local.json`, etc.).
+1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, `duration: '5s'`, `apiVersion: 'v1'`, load durations).
+2. **Environment Load Profile**: Loads load parameters (VUs, duration, and load ramp durations) from environment profile JSON files (`k6/config/local.json`, etc.).
 3. **Target Environment Configuration**: Base URLs and API versions fetched from the [targets.js](k6/config/targets.js) registry.
 4. **Runtime Overrides**: Values supplied via environment variables (`__ENV`) take absolute priority over static files.
 
@@ -69,35 +73,14 @@ When a scenario is launched, configuration parameters are resolved in this stric
 You can override resolved config values at runtime by setting:
 - `PULSE_ENV`: Target environment (default: `local`)
 - `PULSE_TARGET`: Target API (e.g., `phoenix`, `trajectory`) — **Must be explicitly provided**
+- `PULSE_SCENARIO`: Scenario selector (`load`, `smoke`, default: `load`)
 - `PULSE_TARGET_URL`: Overrides resolved base URL (e.g., `http://localhost:4000`)
-- `PULSE_VUS`: Overrides Virtual User (VU) count (e.g., `5`)
-- `PULSE_DURATION`: Overrides execution duration (e.g., `30s`)
+- `PULSE_VUS`: Overrides target Virtual User (VU) count (e.g., `5`)
+- `PULSE_DURATION`: Overrides execution duration (for smoke tests, e.g., `30s`)
 - `PULSE_API_VERSION`: Overrides target API version (e.g., `v3`)
-
-### Registry Extensibility: Adding a New Target
-
-To register a new target system:
-1. Open [k6/config/targets.js](k6/config/targets.js).
-2. Append a new target configuration block:
-   ```javascript
-   my_api: {
-     id: 'my_api',
-     displayName: 'My New API Service',
-     environments: {
-       local: { baseUrl: 'http://test.k6.io', apiVersion: 'v1' },
-       staging: { baseUrl: 'https://staging.myapi.local', apiVersion: 'v1' },
-       // ... other environments
-     },
-     endpoints: {
-       health: { id: 'health', method: 'GET', path: '/health' },
-       // ... other endpoints
-     },
-     testData: {
-       sampleId: 'id_123'
-     }
-   }
-   ```
-No loader source code changes are required.
+- `PULSE_RAMP_UP`: Overrides load profile ramp-up duration (e.g., `5s`)
+- `PULSE_HOLD`: Overrides load profile hold duration (e.g., `10s`)
+- `PULSE_RAMP_DOWN`: Overrides load profile ramp-down duration (e.g., `5s`)
 
 ---
 
@@ -121,36 +104,33 @@ This starts:
 
 To check if the databases and dashboards are healthy:
 - **InfluxDB**: Run `curl http://localhost:8086/ping` (should return HTTP status `204`).
-- **Grafana**: Open [http://localhost:3000](http://localhost:3000) in your browser. (Sign in with Username: `admin`, Password: `admin` if prompted, though anonymous Admin access is pre-configured).
+- **Grafana**: Open [http://localhost:3000](http://localhost:3000) in your browser (Username: `admin`, Password: `admin`).
 
-### Step 3: Run Target Configurations
+### Step 3: Run Core Load Scenarios
 
 Execute local tests and stream results to InfluxDB using the following commands:
 
 ```bash
-# 1. Run Phoenix smoke test (defaults to Phoenix in docker-compose.yml)
+# 1. Run Phoenix load test (defaults to Phoenix and Load scenario in docker-compose.yml)
 docker compose -f docker/docker-compose.yml run --rm k6
 
-# 2. Run Trajectory smoke test
+# 2. Run Trajectory load test
 docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory k6
 
-# 3. Target Staging environment for Trajectory
+# 3. Target Staging environment for Trajectory load test
 docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory -e PULSE_ENV=staging k6
 
-# 4. Run with custom base URL override
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=phoenix -e PULSE_TARGET_URL=https://httpbin.org/anything k6
-```
+# 4. Run overrides test: custom VUs, ramping periods, and custom base URL
+docker compose -f docker/docker-compose.yml run --rm \
+  -e PULSE_TARGET=phoenix \
+  -e PULSE_TARGET_URL=https://httpbin.org \
+  -e PULSE_VUS=5 \
+  -e PULSE_RAMP_UP=5s \
+  -e PULSE_HOLD=15s \
+  -e PULSE_RAMP_DOWN=5s k6
 
-### Configuration Error Handling
-
-If you omit the target identifier or select an invalid setting, the configuration loader will throw an explicit error and stop execution:
-
-```bash
-# Throws error: No API target selected
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET="" k6
-
-# Throws error: Unsupported target: "invalid"
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=invalid k6
+# 5. Run regression check using the Smoke scenario
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=smoke k6
 ```
 
 ### Step 4: Tear Down Infrastructure
@@ -166,4 +146,4 @@ docker compose -f docker/docker-compose.yml down -v
 ## CI/CD Validation
 
 A GitHub Actions workflow is defined in `.github/workflows/validation.yml`. 
-On every push and pull request to `main`, the CI runner executes the k6 entrypoint using the official `grafana/k6-action@v2` running as a dry-run syntax check, using `PULSE_TARGET=phoenix` in the `local` environment.
+On every push and pull request to `main`, the CI runner executes the k6 entrypoint using the official `grafana/k6-action@v2` running as a dry-run syntax check, using `PULSE_TARGET=phoenix` in the `local` environment running the default load testing scenario.
