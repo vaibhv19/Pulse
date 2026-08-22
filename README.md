@@ -23,15 +23,16 @@ Pulse/
 │   └── docker-compose.yml       # InfluxDB + Grafana + on-demand k6 setup
 ├── k6/
 │   ├── config/
-│   │   ├── loader.js            # Environment config loader (resolves overrides)
-│   │   ├── local.json           # Local environment settings (defaults to http://test.k6.io)
-│   │   ├── development.json     # Dev environment settings
-│   │   ├── staging.json         # Staging environment settings
-│   │   └── production-like.json # Production-like environment settings
+│   │   ├── loader.js            # Environment & Target config loader (resolves overrides)
+│   │   ├── targets.js           # API Target Registry (supported systems, endpoints, test data)
+│   │   ├── local.json           # Local load profile configuration
+│   │   ├── development.json     # Dev load profile configuration
+│   │   ├── staging.json         # Staging load profile configuration
+│   │   └── production-like.json # Production-like load profile configuration
 │   ├── lib/
 │   │   └── utils.js             # Reusable helper utilities
 │   ├── scripts/
-│   │   └── smoke_test.js        # Basic test scenario executing GET request
+│   │   └── smoke_test.js        # Basic test scenario executing GET request from registry
 │   └── main.js                  # Main entrypoint and scenario runner definition
 └── README.md                    # Developer guide (this file)
 ```
@@ -49,21 +50,54 @@ No local installation of Go or k6 is required, as all tools run inside Docker co
 
 ---
 
-## Configuration and Environments
+## Configuration and Targeting Strategy
 
-Pulse supports environment-specific configuration via JSON files in `k6/config/`. The active environment is determined by the `PULSE_ENV` environment variable:
-- `local` (Default)
-- `development`
-- `staging`
-- `production-like`
+Pulse uses an environment-aware target configuration strategy. To resolve the final configuration, the system combines:
+1. **Target Selection (`PULSE_TARGET`)**: Defines the API to target (e.g. `phoenix` or `trajectory`).
+2. **Environment Selection (`PULSE_ENV`)**: Defines the target environment profile (e.g. `local`, `development`, `staging`, `production-like`).
+
+### Precedence Resolution Rules
+
+When a scenario is launched, configuration parameters are resolved in this strict order:
+1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, `duration: '5s'`, `apiVersion: 'v1'`).
+2. **Environment Load Profile**: Loads load parameters (e.g. `vus` and `duration` thresholds) from environment profile files (`k6/config/local.json`, etc.).
+3. **Target Environment Configuration**: Base URLs and API versions fetched from the [targets.js](k6/config/targets.js) registry.
+4. **Runtime Overrides**: Values supplied via environment variables (`__ENV`) take absolute priority over static files.
 
 ### Overrides via Environment Variables
 
-You can override config values without editing JSON files by setting the following environment variables:
-- `PULSE_ENV`: Environment config selection (e.g. `staging`)
-- `PULSE_TARGET_URL`: Base target URL (e.g. `http://localhost:4000`)
-- `PULSE_VUS`: Virtual User (VU) count override (e.g. `5`)
-- `PULSE_DURATION`: Test duration override (e.g. `30s`)
+You can override resolved config values at runtime by setting:
+- `PULSE_ENV`: Target environment (default: `local`)
+- `PULSE_TARGET`: Target API (e.g., `phoenix`, `trajectory`) — **Must be explicitly provided**
+- `PULSE_TARGET_URL`: Overrides resolved base URL (e.g., `http://localhost:4000`)
+- `PULSE_VUS`: Overrides Virtual User (VU) count (e.g., `5`)
+- `PULSE_DURATION`: Overrides execution duration (e.g., `30s`)
+- `PULSE_API_VERSION`: Overrides target API version (e.g., `v3`)
+
+### Registry Extensibility: Adding a New Target
+
+To register a new target system:
+1. Open [k6/config/targets.js](k6/config/targets.js).
+2. Append a new target configuration block:
+   ```javascript
+   my_api: {
+     id: 'my_api',
+     displayName: 'My New API Service',
+     environments: {
+       local: { baseUrl: 'http://test.k6.io', apiVersion: 'v1' },
+       staging: { baseUrl: 'https://staging.myapi.local', apiVersion: 'v1' },
+       // ... other environments
+     },
+     endpoints: {
+       health: { id: 'health', method: 'GET', path: '/health' },
+       // ... other endpoints
+     },
+     testData: {
+       sampleId: 'id_123'
+     }
+   }
+   ```
+No loader source code changes are required.
 
 ---
 
@@ -89,24 +123,34 @@ To check if the databases and dashboards are healthy:
 - **InfluxDB**: Run `curl http://localhost:8086/ping` (should return HTTP status `204`).
 - **Grafana**: Open [http://localhost:3000](http://localhost:3000) in your browser. (Sign in with Username: `admin`, Password: `admin` if prompted, though anonymous Admin access is pre-configured).
 
-### Step 3: Run the Smoke Test
+### Step 3: Run Target Configurations
 
-To run the foundation smoke test scenario through k6 and stream the results to InfluxDB, execute:
+Execute local tests and stream results to InfluxDB using the following commands:
 
 ```bash
+# 1. Run Phoenix smoke test (defaults to Phoenix in docker-compose.yml)
 docker compose -f docker/docker-compose.yml run --rm k6
+
+# 2. Run Trajectory smoke test
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory k6
+
+# 3. Target Staging environment for Trajectory
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory -e PULSE_ENV=staging k6
+
+# 4. Run with custom base URL override
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=phoenix -e PULSE_TARGET_URL=https://httpbin.org/anything k6
 ```
 
-This will run the k6 load test container, output live metrics in the terminal, stream data directly to InfluxDB, and automatically remove the container when complete.
+### Configuration Error Handling
 
-To run tests targeting a different environment or custom URL:
+If you omit the target identifier or select an invalid setting, the configuration loader will throw an explicit error and stop execution:
 
 ```bash
-# Target the Staging environment
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_ENV=staging k6
+# Throws error: No API target selected
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET="" k6
 
-# Target a local server with custom load options
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET_URL=http://localhost:4000 -e PULSE_VUS=5 -e PULSE_DURATION=10s k6
+# Throws error: Unsupported target: "invalid"
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=invalid k6
 ```
 
 ### Step 4: Tear Down Infrastructure
@@ -122,7 +166,4 @@ docker compose -f docker/docker-compose.yml down -v
 ## CI/CD Validation
 
 A GitHub Actions workflow is defined in `.github/workflows/validation.yml`. 
-On every push and pull request to `main`, the CI runner:
-1. Checks out the source code.
-2. Performs a syntax dry-run of our k6 entrypoint using the official `grafana/k6-action@v2`.
-3. Verifies that all configuration files and utility modules resolve successfully.
+On every push and pull request to `main`, the CI runner executes the k6 entrypoint using the official `grafana/k6-action@v2` running as a dry-run syntax check, using `PULSE_TARGET=phoenix` in the `local` environment.
