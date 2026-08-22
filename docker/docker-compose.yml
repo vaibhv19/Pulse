@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  influxdb:
+    image: influxdb:1.8-alpine
+    container_name: pulse-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=k6
+      - INFLUXDB_ADMIN_ENABLED=true
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: pulse-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - influxdb
+
+  k6:
+    image: grafana/k6:0.49.0
+    container_name: pulse-k6
+    volumes:
+      - ../k6:/k6
+    environment:
+      - PULSE_ENV=local
+      - K6_OUT=influxdb=http://influxdb:8086/k6
+    depends_on:
+      - influxdb
+    # By default, keep the container idle or run a command.
+    # Running 'run' with the entrypoint script is standard for on-demand execution.
+    entrypoint: ["k6"]
+    command: ["run", "/k6/main.js"]
+
+volumes:
+  influxdb-data:
+  grafana-data:
