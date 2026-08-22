@@ -14,7 +14,7 @@ The framework is organized into distinct areas of concern:
 Pulse/
 ├── .github/
 │   └── workflows/
-│       └── validation.yml       # CI validation workflow running k6 smoke tests
+│       └── validation.yml       # CI validation workflow running k6 smoke tests & archiving diagnostics
 ├── docker/
 │   ├── grafana/
 │   │   └── provisioning/
@@ -23,8 +23,9 @@ Pulse/
 │   └── docker-compose.yml       # InfluxDB + Grafana + on-demand k6 setup
 ├── k6/
 │   ├── config/
-│   │   ├── loader.js            # Environment & Target config loader (resolves overrides)
+│   │   ├── loader.js            # Environment & Target config loader (resolves overrides & budgets)
 │   │   ├── targets.js           # API Target Registry (supported systems, endpoints, test data)
+│   │   ├── budgets.js           # Centralized Performance Budgets (latency and error limits)
 │   │   ├── local.json           # Local load profile configuration (VUs, durations)
 │   │   ├── development.json     # Dev load profile configuration (VUs, durations)
 │   │   ├── staging.json         # Staging load profile configuration (VUs, durations)
@@ -34,7 +35,7 @@ Pulse/
 │   ├── scripts/
 │   │   ├── smoke_test.js        # Smoke test scenario (single target GET request)
 │   │   └── load_test.js         # Core load test scenario (multi-endpoint ramping concurrent run)
-│   └── main.js                  # Main entrypoint and scenario selector options
+│   └── main.js                  # Main entrypoint, thresholds evaluation, and summary export hooks
 └── README.md                    # Developer guide (this file)
 ```
 
@@ -60,27 +61,42 @@ Pulse uses an environment-aware target configuration strategy. To resolve the fi
    - `load` (Default) — Ramping-VU concurrent load test
    - `smoke` — Light constant-VU smoke validation
 
+---
+
+## Centralized Performance Budgets
+
+Performance budgets define latency and failure constraints for targets and scenarios. They are defined centrally in [budgets.js](k6/config/budgets.js) to avoid duplication.
+
+### Enforced Metrics
+
+1. **p95 Latency (`p95Latency`)**: Evaluated via k6 `http_req_duration`. E.g., `p(95) < 1800` ms.
+   - *Rationale:* Ensures that tail latency remains acceptable under load, guarding against performance regressions.
+2. **Request Failure Rate (`maxFailureRate`)**: Evaluated via k6 `http_req_failed`. E.g., `rate < 0.02` (2% failure limit).
+   - *Rationale:* Guards against hidden system failures, resource leaks, or error responses under load.
+
 ### Precedence Resolution Rules
 
-When a scenario is launched, configuration parameters are resolved in this strict order:
-1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, `duration: '5s'`, `apiVersion: 'v1'`, load durations).
-2. **Environment Load Profile**: Loads load parameters (VUs, duration, and load ramp durations) from environment profile JSON files (`k6/config/local.json`, etc.).
-3. **Target Environment Configuration**: Base URLs and API versions fetched from the [targets.js](k6/config/targets.js) registry.
-4. **Runtime Overrides**: Values supplied via environment variables (`__ENV`) take absolute priority over static files.
+When a scenario is launched, configuration parameters and budgets are resolved in this strict order:
+1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, default budget limits).
+2. **Environment Load Profile**: Loads load parameters (VUs, durations) from profile JSON files (`k6/config/local.json`, etc.).
+3. **Target Registry & Centralized Budgets**:
+   - Base URLs and API versions fetched from the [targets.js](k6/config/targets.js) registry.
+   - Threshold parameters mapped from the [budgets.js](k6/config/budgets.js) registry based on Target + Scenario.
+4. **Environment-Specific Budget Overrides**: Custom budgets specified for the active environment (e.g. `staging`) inside `budgets.js`.
+5. **Runtime Overrides**: Values supplied via environment variables (`__ENV`) take absolute priority.
 
 ### Overrides via Environment Variables
 
-You can override resolved config values at runtime by setting:
+You can override resolved config and budget values at runtime:
 - `PULSE_ENV`: Target environment (default: `local`)
 - `PULSE_TARGET`: Target API (e.g., `phoenix`, `trajectory`) — **Must be explicitly provided**
 - `PULSE_SCENARIO`: Scenario selector (`load`, `smoke`, default: `load`)
-- `PULSE_TARGET_URL`: Overrides resolved base URL (e.g., `http://localhost:4000`)
-- `PULSE_VUS`: Overrides target Virtual User (VU) count (e.g., `5`)
-- `PULSE_DURATION`: Overrides execution duration (for smoke tests, e.g., `30s`)
-- `PULSE_API_VERSION`: Overrides target API version (e.g., `v3`)
-- `PULSE_RAMP_UP`: Overrides load profile ramp-up duration (e.g., `5s`)
-- `PULSE_HOLD`: Overrides load profile hold duration (e.g., `10s`)
-- `PULSE_RAMP_DOWN`: Overrides load profile ramp-down duration (e.g., `5s`)
+- `PULSE_TARGET_URL`: Overrides resolved base URL
+- `PULSE_VUS`: Overrides Virtual User (VU) count
+- `PULSE_DURATION`: Overrides execution duration (for smoke tests)
+- `PULSE_RAMP_UP`/`PULSE_HOLD`/`PULSE_RAMP_DOWN`: Overrides load profile durations
+- `PULSE_BUDGET_LATENCY`: Overrides p95 latency limit in ms (e.g., `500` for 500ms)
+- `PULSE_BUDGET_FAILURES`: Overrides maximum failure rate (e.g., `0.05` for 5% limit)
 
 ---
 
@@ -96,46 +112,48 @@ Run the following command from the root of the repository to start **InfluxDB** 
 docker compose -f docker/docker-compose.yml up -d influxdb grafana
 ```
 
-This starts:
-1. **InfluxDB** (on port `8086`) - creates the `k6` database for storing metrics.
-2. **Grafana** (on port `3000`) - provisions `InfluxDB` automatically as the default data source.
+This starts InfluxDB (on port `8086`) and Grafana (on port `3000`).
 
 ### Step 2: Verify Service Connectivity
 
-To check if the databases and dashboards are healthy:
 - **InfluxDB**: Run `curl http://localhost:8086/ping` (should return HTTP status `204`).
-- **Grafana**: Open [http://localhost:3000](http://localhost:3000) in your browser (Username: `admin`, Password: `admin`).
+- **Grafana**: Open [http://localhost:3000](http://localhost:3000) (Username: `admin`, Password: `admin`).
 
-### Step 3: Run Core Load Scenarios
+### Step 3: Run Core Load Scenarios & Gated Paths
 
-Execute local tests and stream results to InfluxDB using the following commands:
+#### The Passing Path (Normal Execution)
+
+A representative workload that runs successfully within budgets:
 
 ```bash
-# 1. Run Phoenix load test (defaults to Phoenix and Load scenario in docker-compose.yml)
 docker compose -f docker/docker-compose.yml run --rm k6
-
-# 2. Run Trajectory load test
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory k6
-
-# 3. Target Staging environment for Trajectory load test
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_TARGET=trajectory -e PULSE_ENV=staging k6
-
-# 4. Run overrides test: custom VUs, ramping periods, and custom base URL
-docker compose -f docker/docker-compose.yml run --rm \
-  -e PULSE_TARGET=phoenix \
-  -e PULSE_TARGET_URL=https://httpbin.org \
-  -e PULSE_VUS=5 \
-  -e PULSE_RAMP_UP=5s \
-  -e PULSE_HOLD=15s \
-  -e PULSE_RAMP_DOWN=5s k6
-
-# 5. Run regression check using the Smoke scenario
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=smoke k6
 ```
 
-### Step 4: Tear Down Infrastructure
+This should output a clean metrics summary, execute successfully, and exit with code `0`.
 
-To stop and remove all local containers and volumes, run:
+#### The Failing Path (Intentional Budget Violations)
+
+You can trigger a threshold failure by setting an intentionally strict runtime budget override:
+
+```bash
+# Violates latency: p95 duration must be under 10ms
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_BUDGET_LATENCY=10 k6
+
+# Violates failure rate: maximum failure rate of 0% (if any request fails)
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_BUDGET_FAILURES=0.00 k6
+```
+
+If a threshold is crossed, k6 will flag it in red, output a console warning, and exit with a non-zero exit code (`1` or `99`), causing the execution command to fail.
+
+### Step 4: Inspect Diagnostics Summaries
+
+At the end of each run, k6 generates two summary files inside the `k6/` directory:
+- `summary.json`: Detailed machine-readable JSON summary of metrics and thresholds evaluation.
+- `summary.txt`: Human-readable console text summary.
+
+### Step 5: Tear Down Infrastructure
+
+To stop and remove all local containers and volumes:
 
 ```bash
 docker compose -f docker/docker-compose.yml down -v
@@ -143,7 +161,12 @@ docker compose -f docker/docker-compose.yml down -v
 
 ---
 
-## CI/CD Validation
+## CI/CD Validation & Diagnostics
 
-A GitHub Actions workflow is defined in `.github/workflows/validation.yml`. 
-On every push and pull request to `main`, the CI runner executes the k6 entrypoint using the official `grafana/k6-action@v2` running as a dry-run syntax check, using `PULSE_TARGET=phoenix` in the `local` environment running the default load testing scenario.
+A GitHub Actions workflow is defined in `.github/workflows/validation.yml`.
+
+On every push and pull request to `main`, the CI runner:
+1. Prepares the environment and runs the Pulse load test scenario (in dry-run mode against the public `test.k6.io` baseline API).
+2. Evaluates the resolved performance budget thresholds.
+3. If k6 exits with a non-zero exit code due to a performance gate failure, **the CI workflow job fails**.
+4. Regardless of execution success or failure, the workflow archives the generated diagnostics files (`summary.json`, `summary.txt`) as workflow artifacts.
