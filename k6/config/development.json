@@ -1,4 +1,6 @@
 {
   "vus": 5,
-  "duration": "10s"
+  "rampUpDuration": "5s",
+  "holdDuration": "15s",
+  "rampDownDuration": "5s"
 }

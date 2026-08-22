@@ -13,7 +13,10 @@ const configs = {
 const DEFAULTS = {
   vus: 1,
   duration: '5s',
-  apiVersion: 'v1'
+  apiVersion: 'v1',
+  rampUpDuration: '5s',
+  holdDuration: '10s',
+  rampDownDuration: '5s'
 };
 
 /**
@@ -30,8 +33,11 @@ const DEFAULTS = {
  * - PULSE_TARGET: phoenix | trajectory (no default, must be explicitly specified)
  * - PULSE_TARGET_URL: Overrides resolved baseUrl
  * - PULSE_VUS: Overrides VUs count
- * - PULSE_DURATION: Overrides execution duration
+ * - PULSE_DURATION: Overrides execution duration (for smoke tests)
  * - PULSE_API_VERSION: Overrides API version
+ * - PULSE_RAMP_UP: Overrides load profile ramp up duration (e.g. '5s')
+ * - PULSE_HOLD: Overrides load profile hold duration (e.g. '15s')
+ * - PULSE_RAMP_DOWN: Overrides load profile ramp down duration (e.g. '5s')
  */
 export function getConfig() {
   const env = __ENV.PULSE_ENV || 'local';
@@ -89,6 +95,15 @@ export function getConfig() {
   }
   if (__ENV.PULSE_API_VERSION) {
     resolved.apiVersion = __ENV.PULSE_API_VERSION;
+  }
+  if (__ENV.PULSE_RAMP_UP) {
+    resolved.rampUpDuration = __ENV.PULSE_RAMP_UP;
+  }
+  if (__ENV.PULSE_HOLD) {
+    resolved.holdDuration = __ENV.PULSE_HOLD;
+  }
+  if (__ENV.PULSE_RAMP_DOWN) {
+    resolved.rampDownDuration = __ENV.PULSE_RAMP_DOWN;
   }
 
   // Final sanity check: make sure we resolved a baseUrl
