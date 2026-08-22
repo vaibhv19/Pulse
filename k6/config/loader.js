@@ -1,5 +1,6 @@
 // k6/config/loader.js
 import { targets } from './targets.js';
+import { budgets } from './budgets.js';
 
 // Note: k6 requires the path argument of open() to be a static string literal.
 const configs = {
@@ -31,6 +32,7 @@ const DEFAULTS = {
  * Supported Env Vars:
  * - PULSE_ENV: local | development | staging | production-like (default: local)
  * - PULSE_TARGET: phoenix | trajectory (no default, must be explicitly specified)
+ * - PULSE_SCENARIO: smoke | load (default: load)
  * - PULSE_TARGET_URL: Overrides resolved baseUrl
  * - PULSE_VUS: Overrides VUs count
  * - PULSE_DURATION: Overrides execution duration (for smoke tests)
@@ -38,10 +40,13 @@ const DEFAULTS = {
  * - PULSE_RAMP_UP: Overrides load profile ramp up duration (e.g. '5s')
  * - PULSE_HOLD: Overrides load profile hold duration (e.g. '15s')
  * - PULSE_RAMP_DOWN: Overrides load profile ramp down duration (e.g. '5s')
+ * - PULSE_BUDGET_LATENCY: Overrides performance budget p95 latency limit in ms (e.g. 1000)
+ * - PULSE_BUDGET_FAILURES: Overrides performance budget maximum failure rate (e.g. 0.05)
  */
 export function getConfig() {
   const env = __ENV.PULSE_ENV || 'local';
   const target = __ENV.PULSE_TARGET;
+  const scenario = __ENV.PULSE_SCENARIO || 'load';
 
   // 1. Validate Environment
   if (!configs[env]) {
@@ -105,6 +110,35 @@ export function getConfig() {
   if (__ENV.PULSE_RAMP_DOWN) {
     resolved.rampDownDuration = __ENV.PULSE_RAMP_DOWN;
   }
+
+  // 5. Centralized Performance Budget Resolution
+  // Precedence: Default -> Target/Scenario defaults -> Target/Scenario/Env overrides -> Runtime Overrides
+  let budget = Object.assign({}, budgets.default);
+  
+  const targetBudgets = budgets.targets[target];
+  if (targetBudgets && targetBudgets[scenario]) {
+    const scenarioBudget = targetBudgets[scenario];
+    Object.assign(budget, scenarioBudget);
+
+    // Apply environment overrides if defined
+    if (scenarioBudget.environments && scenarioBudget.environments[env]) {
+      Object.assign(budget, scenarioBudget.environments[env]);
+    }
+  }
+
+  // Remove the environments key to keep resolved configuration object clean
+  delete budget.environments;
+
+  // Apply budget runtime overrides if provided
+  if (__ENV.PULSE_BUDGET_LATENCY) {
+    budget.p95Latency = parseInt(__ENV.PULSE_BUDGET_LATENCY, 10);
+  }
+  if (__ENV.PULSE_BUDGET_FAILURES) {
+    budget.maxFailureRate = parseFloat(__ENV.PULSE_BUDGET_FAILURES);
+  }
+
+  resolved.budget = budget;
+  resolved.scenario = scenario;
 
   // Final sanity check: make sure we resolved a baseUrl
   if (!resolved.baseUrl) {
