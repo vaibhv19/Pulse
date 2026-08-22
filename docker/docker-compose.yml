@@ -35,6 +35,7 @@ services:
       - ../k6:/k6
     environment:
       - PULSE_ENV=local
+      - PULSE_TARGET=phoenix
       - K6_OUT=influxdb=http://influxdb:8086/k6
     depends_on:
       - influxdb
