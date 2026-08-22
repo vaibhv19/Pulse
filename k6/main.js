@@ -2,12 +2,28 @@
 import { getConfig } from './config/loader.js';
 import { runSmokeTest } from './scripts/smoke_test.js';
 import { runLoadTest } from './scripts/load_test.js';
+import { runStressTest } from './scripts/stress_test.js';
+import { runRecoveryCheck } from './scripts/recovery_test.js';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 
 const config = getConfig();
 const scenarioType = config.scenario;
 
 let activeScenarios = {};
+
+/**
+ * Utility to parse duration strings (e.g. '5s', '2m') to numerical seconds.
+ */
+function parseDurationToSeconds(durationStr) {
+  const match = durationStr.match(/^(\d+)(s|m|h)$/);
+  if (!match) return 5;
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  if (unit === 's') return value;
+  if (unit === 'm') return value * 60;
+  if (unit === 'h') return value * 3600;
+  return value;
+}
 
 // Setup scenarios dynamically based on PULSE_SCENARIO
 if (scenarioType === 'smoke') {
@@ -33,9 +49,48 @@ if (scenarioType === 'smoke') {
       exec: 'load'
     }
   };
+} else if (scenarioType === 'stress') {
+  // 1. Build escalating steps stages
+  const stages = [];
+  const stepDurationSec = parseDurationToSeconds(config.stressStepDuration);
+  
+  for (let i = 1; i <= config.stressStagesCount; i++) {
+    const target = Math.round((config.stressMaxVUs / config.stressStagesCount) * i);
+    stages.push({ duration: config.stressStepDuration, target: target });
+  }
+  
+  // 2. Add max VUs hold stage
+  stages.push({ duration: config.stressHoldDuration, target: config.stressMaxVUs });
+  
+  // 3. Add ramp down stage
+  stages.push({ duration: config.stressRampDownDuration, target: 0 });
+
+  // 4. Calculate total stress test duration to delay recovery execution start time
+  const totalStressSeconds = 
+    (stepDurationSec * config.stressStagesCount) + 
+    parseDurationToSeconds(config.stressHoldDuration) + 
+    parseDurationToSeconds(config.stressRampDownDuration);
+
+  activeScenarios = {
+    stress_test: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: stages,
+      gracefulRampDown: '5s',
+      exec: 'stress'
+    },
+    recovery_test: {
+      executor: 'shared-iterations',
+      vus: 1,
+      iterations: 1,
+      maxDuration: '10s',
+      startTime: `${totalStressSeconds}s`,
+      exec: 'recovery'
+    }
+  };
 } else {
   throw new Error(
-    `[Pulse Config Error] Unsupported scenario type: "${scenarioType}". Supported scenarios: smoke, load.`
+    `[Pulse Config Error] Unsupported scenario type: "${scenarioType}". Supported scenarios: smoke, load, stress.`
   );
 }
 
@@ -43,9 +98,9 @@ if (scenarioType === 'smoke') {
 export const options = {
   scenarios: activeScenarios,
   thresholds: {
-    // Dynamic Performance Budget Thresholds
-    http_req_failed: [`rate<${config.budget.maxFailureRate}`],      // e.g. rate < 0.01
-    http_req_duration: [`p(95)<${config.budget.p95Latency}`]         // e.g. p(95) < 1500
+    // Dynamic Performance Budget Thresholds (Scenario specific)
+    http_req_failed: [`rate<${config.budget.maxFailureRate}`],
+    http_req_duration: [`p(95)<${config.budget.p95Latency}`]
   },
   tags: {
     environment: config.environment,
@@ -68,11 +123,26 @@ export function load() {
 }
 
 /**
+ * Dispatcher for escalating stress testing scenario.
+ */
+export function stress() {
+  runStressTest(config);
+}
+
+/**
+ * Dispatcher for post-stress resilience checking scenario.
+ */
+export function recovery() {
+  runRecoveryCheck(config);
+}
+
+/**
  * Hook to export execution summaries to working directory.
  * Writes summary.json and summary.txt, and displays standard text output in stdout.
  */
 export function handleSummary(data) {
   console.log(`[Pulse Performance Gate Evaluation Complete]`);
+  console.log(`- Scenario Executed: ${scenarioType}`);
   console.log(`- p(95) Latency Gate: p(95) < ${config.budget.p95Latency}ms`);
   console.log(`- Request Failure Gate: Fail Rate < ${(config.budget.maxFailureRate * 100).toFixed(1)}%`);
 
