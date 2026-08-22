@@ -36,6 +36,15 @@ export const budgets = {
             p95Latency: 1200
           }
         }
+      },
+      stress: {
+        p95Latency: 5000,
+        maxFailureRate: 0.10,
+        environments: {
+          staging: {
+            p95Latency: 4000
+          }
+        }
       }
     },
     trajectory: {
@@ -54,6 +63,15 @@ export const budgets = {
         environments: {
           staging: {
             p95Latency: 1500
+          }
+        }
+      },
+      stress: {
+        p95Latency: 5000,
+        maxFailureRate: 0.10,
+        environments: {
+          staging: {
+            p95Latency: 4000
           }
         }
       }

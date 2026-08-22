@@ -17,7 +17,14 @@ const DEFAULTS = {
   apiVersion: 'v1',
   rampUpDuration: '5s',
   holdDuration: '10s',
-  rampDownDuration: '5s'
+  rampDownDuration: '5s',
+  
+  // Stress profile defaults
+  stressMaxVUs: 10,
+  stressStepDuration: '5s',
+  stressStagesCount: 3,
+  stressHoldDuration: '10s',
+  stressRampDownDuration: '5s'
 };
 
 /**
@@ -32,7 +39,7 @@ const DEFAULTS = {
  * Supported Env Vars:
  * - PULSE_ENV: local | development | staging | production-like (default: local)
  * - PULSE_TARGET: phoenix | trajectory (no default, must be explicitly specified)
- * - PULSE_SCENARIO: smoke | load (default: load)
+ * - PULSE_SCENARIO: smoke | load | stress (default: load)
  * - PULSE_TARGET_URL: Overrides resolved baseUrl
  * - PULSE_VUS: Overrides VUs count
  * - PULSE_DURATION: Overrides execution duration (for smoke tests)
@@ -42,6 +49,11 @@ const DEFAULTS = {
  * - PULSE_RAMP_DOWN: Overrides load profile ramp down duration (e.g. '5s')
  * - PULSE_BUDGET_LATENCY: Overrides performance budget p95 latency limit in ms (e.g. 1000)
  * - PULSE_BUDGET_FAILURES: Overrides performance budget maximum failure rate (e.g. 0.05)
+ * - PULSE_STRESS_MAX_VUS: Overrides stress testing max concurrent VUs (e.g. 20)
+ * - PULSE_STRESS_STEP_DURATION: Overrides stress testing step duration (e.g. '10s')
+ * - PULSE_STRESS_STAGES_COUNT: Overrides stress step stages count (e.g. 4)
+ * - PULSE_STRESS_HOLD: Overrides stress hold duration (e.g. '30s')
+ * - PULSE_STRESS_RAMP_DOWN: Overrides stress ramp down duration (e.g. '10s')
  */
 export function getConfig() {
   const env = __ENV.PULSE_ENV || 'local';
@@ -110,9 +122,25 @@ export function getConfig() {
   if (__ENV.PULSE_RAMP_DOWN) {
     resolved.rampDownDuration = __ENV.PULSE_RAMP_DOWN;
   }
+  
+  // Stress testing overrides
+  if (__ENV.PULSE_STRESS_MAX_VUS) {
+    resolved.stressMaxVUs = parseInt(__ENV.PULSE_STRESS_MAX_VUS, 10);
+  }
+  if (__ENV.PULSE_STRESS_STEP_DURATION) {
+    resolved.stressStepDuration = __ENV.PULSE_STRESS_STEP_DURATION;
+  }
+  if (__ENV.PULSE_STRESS_STAGES_COUNT) {
+    resolved.stressStagesCount = parseInt(__ENV.PULSE_STRESS_STAGES_COUNT, 10);
+  }
+  if (__ENV.PULSE_STRESS_HOLD) {
+    resolved.stressHoldDuration = __ENV.PULSE_STRESS_HOLD;
+  }
+  if (__ENV.PULSE_STRESS_RAMP_DOWN) {
+    resolved.stressRampDownDuration = __ENV.PULSE_STRESS_RAMP_DOWN;
+  }
 
   // 5. Centralized Performance Budget Resolution
-  // Precedence: Default -> Target/Scenario defaults -> Target/Scenario/Env overrides -> Runtime Overrides
   let budget = Object.assign({}, budgets.default);
   
   const targetBudgets = budgets.targets[target];
@@ -126,10 +154,8 @@ export function getConfig() {
     }
   }
 
-  // Remove the environments key to keep resolved configuration object clean
   delete budget.environments;
 
-  // Apply budget runtime overrides if provided
   if (__ENV.PULSE_BUDGET_LATENCY) {
     budget.p95Latency = parseInt(__ENV.PULSE_BUDGET_LATENCY, 10);
   }
@@ -139,6 +165,31 @@ export function getConfig() {
 
   resolved.budget = budget;
   resolved.scenario = scenario;
+
+  // 6. Validate Resolved Values (Fail-fast validations)
+  if (resolved.vus <= 0) {
+    throw new Error(`[Pulse Config Error] Invalid VUs count: ${resolved.vus}. Must be positive.`);
+  }
+  if (resolved.stressMaxVUs <= 0) {
+    throw new Error(`[Pulse Config Error] Invalid Stress Max VUs: ${resolved.stressMaxVUs}. Must be positive.`);
+  }
+  if (resolved.stressStagesCount <= 0) {
+    throw new Error(`[Pulse Config Error] Invalid Stress Stages Count: ${resolved.stressStagesCount}. Must be positive.`);
+  }
+
+  const durationPattern = /^\d+(s|m|h)$/;
+  if (resolved.duration && !durationPattern.test(resolved.duration)) {
+    throw new Error(`[Pulse Config Error] Invalid duration format: "${resolved.duration}". E.g. "5s", "1m".`);
+  }
+  if (resolved.stressStepDuration && !durationPattern.test(resolved.stressStepDuration)) {
+    throw new Error(`[Pulse Config Error] Invalid stressStepDuration format: "${resolved.stressStepDuration}". E.g. "5s".`);
+  }
+  if (resolved.stressHoldDuration && !durationPattern.test(resolved.stressHoldDuration)) {
+    throw new Error(`[Pulse Config Error] Invalid stressHoldDuration format: "${resolved.stressHoldDuration}". E.g. "10s".`);
+  }
+  if (resolved.stressRampDownDuration && !durationPattern.test(resolved.stressRampDownDuration)) {
+    throw new Error(`[Pulse Config Error] Invalid stressRampDownDuration format: "${resolved.stressRampDownDuration}". E.g. "5s".`);
+  }
 
   // Final sanity check: make sure we resolved a baseUrl
   if (!resolved.baseUrl) {

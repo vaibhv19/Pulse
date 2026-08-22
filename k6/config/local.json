@@ -2,5 +2,10 @@
   "vus": 2,
   "rampUpDuration": "3s",
   "holdDuration": "5s",
-  "rampDownDuration": "3s"
+  "rampDownDuration": "3s",
+  "stressMaxVUs": 4,
+  "stressStepDuration": "2s",
+  "stressStagesCount": 3,
+  "stressHoldDuration": "5s",
+  "stressRampDownDuration": "2s"
 }
