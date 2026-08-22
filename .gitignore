@@ -1,0 +1,9 @@
+# k6 execution summaries
+k6/summary.json
+k6/summary.txt
+summary.json
+summary.txt
+
+# OS metadata
+.DS_Store
+Thumbs.db
