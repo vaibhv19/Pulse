@@ -75,10 +75,10 @@ export const targets = {
         method: 'GET',
         path: '/'
       },
-      flip: {
-        id: 'flip',
+      pi: {
+        id: 'pi',
         method: 'GET',
-        path: '/flip.php'
+        path: '/pi.php'
       }
     },
     testData: {
