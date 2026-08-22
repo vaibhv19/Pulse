@@ -1,6 +1,4 @@
 {
-  "environment": "development",
-  "targetUrl": "https://dev.api.pulse-testing.local",
   "vus": 5,
   "duration": "10s"
 }

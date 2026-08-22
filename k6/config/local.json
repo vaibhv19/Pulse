@@ -1,6 +1,4 @@
 {
-  "environment": "local",
-  "targetUrl": "http://test.k6.io",
   "vus": 1,
   "duration": "5s"
 }

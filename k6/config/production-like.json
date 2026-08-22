@@ -1,6 +1,4 @@
 {
-  "environment": "production-like",
-  "targetUrl": "https://api.pulse-testing.local",
   "vus": 20,
   "duration": "1m"
 }

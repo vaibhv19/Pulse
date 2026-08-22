@@ -1,6 +1,4 @@
 {
-  "environment": "staging",
-  "targetUrl": "https://staging.api.pulse-testing.local",
   "vus": 10,
   "duration": "30s"
 }
