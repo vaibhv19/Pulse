@@ -1,0 +1,24 @@
+name: Pulse - Validation
+
+on:
+  push:
+    branches: [ main, 'feature/**' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-k6:
+    name: Validate k6 Scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run k6 Smoke Test (Dry Run)
+        uses: grafana/k6-action@v2
+        with:
+          filename: k6/main.js
+          flags: --vus 1 --duration 1s
+        env:
+          PULSE_ENV: local
