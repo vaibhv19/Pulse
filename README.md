@@ -26,15 +26,17 @@ Pulse/
 │   │   ├── loader.js            # Environment & Target config loader (resolves overrides & budgets)
 │   │   ├── targets.js           # API Target Registry (supported systems, endpoints, test data)
 │   │   ├── budgets.js           # Centralized Performance Budgets (latency and error limits)
-│   │   ├── local.json           # Local load profile configuration (VUs, durations)
-│   │   ├── development.json     # Dev load profile configuration (VUs, durations)
-│   │   ├── staging.json         # Staging load profile configuration (VUs, durations)
-│   │   └── production-like.json # Production-like load profile configuration (VUs, durations)
+│   │   ├── local.json           # Local load & stress profile configuration (VUs, durations)
+│   │   ├── development.json     # Dev load & stress profile configuration (VUs, durations)
+│   │   ├── staging.json         # Staging load & stress profile configuration (VUs, durations)
+│   │   └── production-like.json # Production-like load & stress profile configuration (VUs, durations)
 │   ├── lib/
 │   │   └── utils.js             # Reusable helper utilities
 │   ├── scripts/
 │   │   ├── smoke_test.js        # Smoke test scenario (single target GET request)
-│   │   └── load_test.js         # Core load test scenario (multi-endpoint ramping concurrent run)
+│   │   ├── load_test.js         # Core load test scenario (multi-endpoint ramping concurrent run)
+│   │   ├── stress_test.js       # Escalating stress test scenario (multi-step concurrency run)
+│   │   └── recovery_test.js     # Post-stress recovery check (single-user health probe)
 │   └── main.js                  # Main entrypoint, thresholds evaluation, and summary export hooks
 └── README.md                    # Developer guide (this file)
 ```
@@ -60,6 +62,7 @@ Pulse uses an environment-aware target configuration strategy. To resolve the fi
 3. **Scenario Selection (`PULSE_SCENARIO`)**: Defines the scenario profile to execute:
    - `load` (Default) — Ramping-VU concurrent load test
    - `smoke` — Light constant-VU smoke validation
+   - `stress` — Progressive escalating multi-step stress test to discover system boundaries and recovery
 
 ---
 
@@ -69,16 +72,18 @@ Performance budgets define latency and failure constraints for targets and scena
 
 ### Enforced Metrics
 
-1. **p95 Latency (`p95Latency`)**: Evaluated via k6 `http_req_duration`. E.g., `p(95) < 1800` ms.
-   - *Rationale:* Ensures that tail latency remains acceptable under load, guarding against performance regressions.
-2. **Request Failure Rate (`maxFailureRate`)**: Evaluated via k6 `http_req_failed`. E.g., `rate < 0.02` (2% failure limit).
-   - *Rationale:* Guards against hidden system failures, resource leaks, or error responses under load.
+1. **p95 Latency (`p95Latency`)**: Evaluated via k6 `http_req_duration`.
+   - *Load Test limit:* E.g. `p(95) < 1800ms`
+   - *Stress Test limit:* E.g. `p(95) < 5000ms` (relaxed to accommodate expected saturation/degradation)
+2. **Request Failure Rate (`maxFailureRate`)**: Evaluated via k6 `http_req_failed`.
+   - *Load Test limit:* E.g. `rate < 0.02` (2% failure limit)
+   - *Stress Test limit:* E.g. `rate < 0.10` (10% failure limit; failures above this indicate complete target crash)
 
 ### Precedence Resolution Rules
 
 When a scenario is launched, configuration parameters and budgets are resolved in this strict order:
 1. **Default Framework Configuration**: Generic fallback values (`vus: 1`, default budget limits).
-2. **Environment Load Profile**: Loads load parameters (VUs, durations) from profile JSON files (`k6/config/local.json`, etc.).
+2. **Environment Load/Stress Profile**: Loads profile parameters from JSON files (`k6/config/local.json`, etc.).
 3. **Target Registry & Centralized Budgets**:
    - Base URLs and API versions fetched from the [targets.js](k6/config/targets.js) registry.
    - Threshold parameters mapped from the [budgets.js](k6/config/budgets.js) registry based on Target + Scenario.
@@ -90,13 +95,28 @@ When a scenario is launched, configuration parameters and budgets are resolved i
 You can override resolved config and budget values at runtime:
 - `PULSE_ENV`: Target environment (default: `local`)
 - `PULSE_TARGET`: Target API (e.g., `phoenix`, `trajectory`) — **Must be explicitly provided**
-- `PULSE_SCENARIO`: Scenario selector (`load`, `smoke`, default: `load`)
+- `PULSE_SCENARIO`: Scenario selector (`load`, `smoke`, `stress`, default: `load`)
 - `PULSE_TARGET_URL`: Overrides resolved base URL
 - `PULSE_VUS`: Overrides Virtual User (VU) count
 - `PULSE_DURATION`: Overrides execution duration (for smoke tests)
 - `PULSE_RAMP_UP`/`PULSE_HOLD`/`PULSE_RAMP_DOWN`: Overrides load profile durations
-- `PULSE_BUDGET_LATENCY`: Overrides p95 latency limit in ms (e.g., `500` for 500ms)
+- `PULSE_BUDGET_LATENCY`: Overrides performance budget p95 latency limit in ms (e.g., `500` for 500ms)
 - `PULSE_BUDGET_FAILURES`: Overrides maximum failure rate (e.g., `0.05` for 5% limit)
+- `PULSE_STRESS_MAX_VUS`: Overrides stress testing max concurrent VUs (e.g. `20`)
+- `PULSE_STRESS_STEP_DURATION`: Overrides stress testing step duration (e.g. `'10s'`)
+- `PULSE_STRESS_STAGES_COUNT`: Overrides stress step stages count (e.g. `4`)
+- `PULSE_STRESS_HOLD`: Overrides stress hold duration (e.g. `'30s'`)
+- `PULSE_STRESS_RAMP_DOWN`: Overrides stress ramp down duration (e.g. `'10s'`)
+
+---
+
+## Stress & Resilience Testing Workflow
+
+When running in stress mode (`PULSE_SCENARIO=stress`), Pulse automatically orchestrates:
+1. **Escalating Step-stages**: The framework escalates active Virtual Users progressively (e.g., local default: 1 VU -> 2 VUs -> 3 VUs -> 4 VUs) over multiple steps.
+2. **Hold Stage**: Sustains maximum concurrent user pressure for a defined period to check for degradation.
+3. **Ramp-down**: Smoothly terminates VUs to 0.
+4. **Post-Stress Recovery Check**: Once stress load drops to 0, k6 dynamically schedules and launches a secondary single-iteration scenario (`recovery_test`) to verify if the API target has recovered, returns HTTP `200 OK`, and is responsive.
 
 ---
 
@@ -112,61 +132,43 @@ Run the following command from the root of the repository to start **InfluxDB** 
 docker compose -f docker/docker-compose.yml up -d influxdb grafana
 ```
 
-This starts InfluxDB (on port `8086`) and Grafana (on port `3000`).
+### Step 2: Run Gated Paths & Scenarios
 
-### Step 2: Verify Service Connectivity
-
-- **InfluxDB**: Run `curl http://localhost:8086/ping` (should return HTTP status `204`).
-- **Grafana**: Open [http://localhost:3000](http://localhost:3000) (Username: `admin`, Password: `admin`).
-
-### Step 3: Run Core Load Scenarios & Gated Paths
-
-#### The Passing Path (Normal Execution)
-
-A representative workload that runs successfully within budgets:
+#### Load Test Scenario (Passing Path)
 
 ```bash
 docker compose -f docker/docker-compose.yml run --rm k6
 ```
 
-This should output a clean metrics summary, execute successfully, and exit with code `0`.
+#### Stress Test Scenario
 
-#### The Failing Path (Intentional Budget Violations)
-
-You can trigger a threshold failure by setting an intentionally strict runtime budget override:
+To run the progressive stress and resilience recovery validation flow against the default target (`phoenix` on `test.k6.io`):
 
 ```bash
-# Violates latency: p95 duration must be under 10ms
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_BUDGET_LATENCY=10 k6
-
-# Violates failure rate: maximum failure rate of 0% (if any request fails)
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_BUDGET_FAILURES=0.00 k6
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=stress k6
 ```
 
-If a threshold is crossed, k6 will flag it in red, output a console warning, and exit with a non-zero exit code (`1` or `99`), causing the execution command to fail.
+#### Stress Test Override Configuration (Failing Path validation)
 
-### Step 4: Inspect Diagnostics Summaries
+To test catastrophic crash bounds or stress thresholds fail-fast checks:
+
+```bash
+# Force latency gate failure during stress run
+docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=stress -e PULSE_BUDGET_LATENCY=5 k6
+```
+
+If a threshold is crossed, the execution will output a warning and exit with a non-zero code.
+
+### Step 3: Inspect Diagnostics Summaries
 
 At the end of each run, k6 generates two summary files inside the `k6/` directory:
 - `summary.json`: Detailed machine-readable JSON summary of metrics and thresholds evaluation.
 - `summary.txt`: Human-readable console text summary.
 
-### Step 5: Tear Down Infrastructure
+### Step 4: Tear Down Infrastructure
 
 To stop and remove all local containers and volumes:
 
 ```bash
 docker compose -f docker/docker-compose.yml down -v
 ```
-
----
-
-## CI/CD Validation & Diagnostics
-
-A GitHub Actions workflow is defined in `.github/workflows/validation.yml`.
-
-On every push and pull request to `main`, the CI runner:
-1. Prepares the environment and runs the Pulse load test scenario (in dry-run mode against the public `test.k6.io` baseline API).
-2. Evaluates the resolved performance budget thresholds.
-3. If k6 exits with a non-zero exit code due to a performance gate failure, **the CI workflow job fails**.
-4. Regardless of execution success or failure, the workflow archives the generated diagnostics files (`summary.json`, `summary.txt`) as workflow artifacts.
