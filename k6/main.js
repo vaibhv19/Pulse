@@ -105,7 +105,8 @@ export const options = {
   tags: {
     environment: config.environment,
     framework: 'pulse'
-  }
+  },
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)']
 };
 
 /**
@@ -138,7 +139,7 @@ export function recovery() {
 
 /**
  * Hook to export execution summaries to working directory.
- * Writes summary.json and summary.txt, and displays standard text output in stdout.
+ * Writes summary.json, summary.txt, and normalized reports/last_run metadata files.
  */
 export function handleSummary(data) {
   console.log(`[Pulse Performance Gate Evaluation Complete]`);
@@ -146,9 +147,103 @@ export function handleSummary(data) {
   console.log(`- p(95) Latency Gate: p(95) < ${config.budget.p95Latency}ms`);
   console.log(`- Request Failure Gate: Fail Rate < ${(config.budget.maxFailureRate * 100).toFixed(1)}%`);
 
+  // Extract core performance metrics
+  const totalRequests = data.metrics.http_reqs ? data.metrics.http_reqs.values.count : 0;
+  const throughput = data.metrics.http_reqs ? data.metrics.http_reqs.values.rate : 0;
+  const totalIterations = data.metrics.iterations ? data.metrics.iterations.values.count : 0;
+  const p50Latency = data.metrics.http_req_duration ? data.metrics.http_req_duration.values['p(50)'] : 0;
+  const p95Latency = data.metrics.http_req_duration ? data.metrics.http_req_duration.values['p(95)'] : 0;
+  const p99Latency = data.metrics.http_req_duration ? data.metrics.http_req_duration.values['p(99)'] : 0;
+  const failureRate = data.metrics.http_req_failed ? data.metrics.http_req_failed.values.rate : 0;
+
+  // Extract performance budget gates dynamically
+  const gates = [];
+  let allGatesPassed = true;
+
+  if (data.metrics.http_req_failed && data.metrics.http_req_failed.thresholds) {
+    const thresh = data.metrics.http_req_failed.thresholds;
+    Object.keys(thresh).forEach((key) => {
+      gates.push({
+        name: 'http_req_failed',
+        limit: key,
+        actual: data.metrics.http_req_failed.values.rate,
+        passed: thresh[key].ok
+      });
+      if (!thresh[key].ok) allGatesPassed = false;
+    });
+  }
+  if (data.metrics.http_req_duration && data.metrics.http_req_duration.thresholds) {
+    const thresh = data.metrics.http_req_duration.thresholds;
+    Object.keys(thresh).forEach((key) => {
+      gates.push({
+        name: 'http_req_duration',
+        limit: key,
+        actual: data.metrics.http_req_duration.values['p(95)'],
+        passed: thresh[key].ok
+      });
+      if (!thresh[key].ok) allGatesPassed = false;
+    });
+  }
+
+  // Build normalized report JSON
+  const reportJson = {
+    metadata: {
+      target: config.targetId,
+      environment: config.environment,
+      scenario: scenarioType,
+      timestamp: new Date().toISOString(),
+      vus: config.vus,
+      duration: scenarioType === 'smoke' ? config.duration : `Ramp: ${config.rampUpDuration}, Hold: ${config.holdDuration}, Down: ${config.rampDownDuration}`
+    },
+    metrics: {
+      totalRequests,
+      totalIterations,
+      p50Latency,
+      p95Latency,
+      p99Latency,
+      failureRate,
+      throughput
+    },
+    gates: gates,
+    status: allGatesPassed ? 'PASS' : 'FAIL'
+  };
+
+  // Generate Markdown report layout
+  const statusEmoji = allGatesPassed ? '✅ PASS' : '❌ FAIL';
+  const reportMd = `# Pulse Performance Run Report
+
+## 🏁 Status: ${statusEmoji}
+
+### 📋 Metadata
+- **Target:** ${config.displayName} (\`${config.targetId}\`)
+- **Environment:** \`${config.environment}\`
+- **Scenario:** \`${scenarioType}\`
+- **Timestamp:** ${reportJson.metadata.timestamp}
+- **VUs (Max):** ${config.vus}
+- **Duration Configuration:** ${reportJson.metadata.duration}
+
+### 📈 Core Performance Metrics
+- **Total Requests:** ${totalRequests}
+- **Throughput:** ${throughput.toFixed(2)} req/sec
+- **Total Iterations:** ${totalIterations}
+- **p50 (Median) Latency:** ${p50Latency.toFixed(2)} ms
+- **p95 Latency:** ${p95Latency.toFixed(2)} ms
+- **p99 Latency:** ${p99Latency.toFixed(2)} ms
+- **Request Failure Rate:** ${(failureRate * 100).toFixed(2)}%
+
+### 🚧 Performance Budget Gates
+${gates.length === 0 ? '_No budget gates configured for this run._' : gates.map(g => {
+  return `- **${g.name}** (\`${g.limit}\`): ${g.passed ? '✅ Passed' : '❌ Failed'} (Actual: ${g.name === 'http_req_failed' ? (g.actual * 100).toFixed(2) + '%' : g.actual.toFixed(2) + 'ms'})`;
+}).join('\n')}
+`;
+
   return {
     'stdout': textSummary(data, { indent: ' ', enableColors: true }),
     'summary.json': JSON.stringify(data, null, 2),
-    'summary.txt': textSummary(data, { indent: ' ', enableColors: false })
+    'summary.txt': textSummary(data, { indent: ' ', enableColors: false }),
+    
+    // Write normalized report structures
+    'reports/last_run.json': JSON.stringify(reportJson, null, 2),
+    'reports/last_run.md': reportMd
   };
 }
