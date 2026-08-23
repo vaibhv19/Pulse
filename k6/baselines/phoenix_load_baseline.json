@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "target": "phoenix",
+    "environment": "local",
+    "scenario": "load",
+    "timestamp": "2026-08-22T20:00:00.000Z",
+    "vus": 2,
+    "duration": "Ramp: 3s, Hold: 5s, Down: 3s"
+  },
+  "metrics": {
+    "totalRequests": 30,
+    "totalIterations": 10,
+    "p50Latency": 80.0,
+    "p95Latency": 240.0,
+    "p99Latency": 250.0,
+    "failureRate": 0.0,
+    "throughput": 2.50
+  },
+  "gates": [
+    {
+      "name": "http_req_failed",
+      "limit": "rate<0.02",
+      "actual": 0.0,
+      "passed": true
+    },
+    {
+      "name": "http_req_duration",
+      "limit": "p(95)<1800",
+      "actual": 240.0,
+      "passed": true
+    }
+  ],
+  "status": "PASS"
+}
