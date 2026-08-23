@@ -4,6 +4,10 @@ k6/summary.txt
 summary.json
 summary.txt
 
+# k6 execution reports
+k6/reports/*
+!k6/reports/.gitkeep
+
 # OS metadata
 .DS_Store
 Thumbs.db

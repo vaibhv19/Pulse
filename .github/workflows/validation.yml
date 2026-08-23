@@ -26,6 +26,9 @@ jobs:
           PULSE_TARGET: phoenix
           PULSE_SCENARIO: load
 
+      - name: Run Performance Run Comparison
+        run: node k6/scripts/compare.js
+
       - name: Archive Performance Summary Reports
         uses: actions/upload-artifact@v4
         if: always() # Preserve logs and diagnostics even on budget violations
@@ -34,4 +37,6 @@ jobs:
           path: |
             summary.json
             summary.txt
+            k6/reports/performance_report.md
+            k6/reports/performance_report.json
           retention-days: 5
