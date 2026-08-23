@@ -28,10 +28,10 @@ if (!fs.existsSync(lastRunJsonPath)) {
 
 console.log(`[Pulse Report] Reading last execution run results...`);
 const current = JSON.parse(fs.readFileSync(lastRunJsonPath, 'utf8'));
-const { target, scenario } = current.metadata;
+const { target, environment, scenario } = current.metadata;
 
-// 2. Locate baseline file
-const baselineFileName = `${target}_${scenario}_baseline.json`;
+// 2. Locate baseline file using target + environment + scenario identity
+const baselineFileName = `${target}_${environment}_${scenario}_baseline.json`;
 const baselinePath = path.join(baselinesDir, baselineFileName);
 
 let comparisonResult = null;
@@ -42,16 +42,51 @@ if (fs.existsSync(baselinePath)) {
   try {
     const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
 
-    // Verify compatibility
-    if (baseline.metadata.target !== target || baseline.metadata.scenario !== scenario) {
-      console.warn(`[Pulse Comparison Warning] Baseline target/scenario (${baseline.metadata.target}/${baseline.metadata.scenario}) is incompatible with current run (${target}/${scenario}). Skipping comparison.`);
+    // Verify compatibility (target + environment + scenario check)
+    const isTargetCompatible = baseline.metadata && baseline.metadata.target === target;
+    const isEnvCompatible = baseline.metadata && baseline.metadata.environment === environment;
+    const isScenarioCompatible = baseline.metadata && baseline.metadata.scenario === scenario;
+
+    if (!isTargetCompatible || !isEnvCompatible || !isScenarioCompatible) {
+      const baseTarget = baseline.metadata ? baseline.metadata.target : 'unknown';
+      const baseEnv = baseline.metadata ? baseline.metadata.environment : 'unknown';
+      const baseScenario = baseline.metadata ? baseline.metadata.scenario : 'unknown';
+      
+      console.warn(`[Pulse Comparison Warning] Baseline target/environment/scenario (${baseTarget}/${baseEnv}/${baseScenario}) is incompatible with current run (${target}/${environment}/${scenario}). Skipping comparison.`);
+      
       comparisonMd = `
 ### ⚠️ Baseline Comparison Skipped
-- **Metadata Mismatch:** Baseline target/scenario (\`${baseline.metadata.target}\` / \`${baseline.metadata.scenario}\`) is incompatible with current run (\`${target}\` / \`${scenario}\`).
+- **Metadata Mismatch:** Baseline target/environment/scenario (\`${baseTarget}\` / \`${baseEnv}\` / \`${baseScenario}\`) is incompatible with current run (\`${target}\` / \`${environment}\` / \`${scenario}\`).
 `;
     } else {
-      // Comparison metric helper (5% variance threshold)
+      // Safe metrics extraction
+      const getMetric = (obj, pathArray) => {
+        let currentObj = obj;
+        for (const p of pathArray) {
+          if (currentObj === undefined || currentObj === null) return undefined;
+          currentObj = currentObj[p];
+        }
+        return currentObj;
+      };
+
+      const currP95 = getMetric(current, ['metrics', 'p95Latency']);
+      const baseP95 = getMetric(baseline, ['metrics', 'p95Latency']);
+      
+      const currP99 = getMetric(current, ['metrics', 'p99Latency']);
+      const baseP99 = getMetric(baseline, ['metrics', 'p99Latency']);
+      
+      const currFail = getMetric(current, ['metrics', 'failureRate']);
+      const baseFail = getMetric(baseline, ['metrics', 'failureRate']);
+      
+      const currThroughput = getMetric(current, ['metrics', 'throughput']);
+      const baseThroughput = getMetric(baseline, ['metrics', 'throughput']);
+
+      // Comparison metric helper (5% variance threshold, safe for NaN/missing metrics)
       const compareMetric = (currVal, baseVal, higherIsBetter = false) => {
+        if (currVal === undefined || currVal === null || isNaN(currVal) ||
+            baseVal === undefined || baseVal === null || isNaN(baseVal)) {
+          return { diffPercent: null, status: 'Unchanged' };
+        }
         if (baseVal === 0) {
           return { diffPercent: 0, status: currVal === 0 ? 'Unchanged' : (higherIsBetter ? 'Improved' : 'Regressed') };
         }
@@ -69,18 +104,18 @@ if (fs.existsSync(baselinePath)) {
         }
       };
 
-      const p95Comp = compareMetric(current.metrics.p95Latency, baseline.metrics.p95Latency);
-      const p99Comp = compareMetric(current.metrics.p99Latency, baseline.metrics.p99Latency);
-      const failComp = compareMetric(current.metrics.failureRate, baseline.metrics.failureRate);
-      const throughputComp = compareMetric(current.metrics.throughput, baseline.metrics.throughput, true);
+      const p95Comp = compareMetric(currP95, baseP95);
+      const p99Comp = compareMetric(currP99, baseP99);
+      const failComp = compareMetric(currFail, baseFail);
+      const throughputComp = compareMetric(currThroughput, baseThroughput, true);
 
       comparisonResult = {
-        baselineTimestamp: baseline.metadata.timestamp,
+        baselineTimestamp: baseline.metadata ? baseline.metadata.timestamp : 'unknown',
         metrics: {
-          p95Latency: { current: current.metrics.p95Latency, baseline: baseline.metrics.p95Latency, diffPercent: p95Comp.diffPercent, status: p95Comp.status },
-          p99Latency: { current: current.metrics.p99Latency, baseline: baseline.metrics.p99Latency, diffPercent: p99Comp.diffPercent, status: p99Comp.status },
-          failureRate: { current: current.metrics.failureRate, baseline: baseline.metrics.failureRate, diffPercent: failComp.diffPercent, status: failComp.status },
-          throughput: { current: current.metrics.throughput, baseline: baseline.metrics.throughput, diffPercent: throughputComp.diffPercent, status: throughputComp.status }
+          p95Latency: { current: currP95, baseline: baseP95, diffPercent: p95Comp.diffPercent, status: p95Comp.status },
+          p99Latency: { current: currP99, baseline: baseP99, diffPercent: p99Comp.diffPercent, status: p99Comp.status },
+          failureRate: { current: currFail, baseline: baseFail, diffPercent: failComp.diffPercent, status: failComp.status },
+          throughput: { current: currThroughput, baseline: baseThroughput, diffPercent: throughputComp.diffPercent, status: throughputComp.status }
         }
       };
 
@@ -91,20 +126,37 @@ if (fs.existsSync(baselinePath)) {
       };
 
       const formatDiff = (diffPercent) => {
+        if (diffPercent === null || diffPercent === undefined) return 'N/A';
         if (Math.abs(diffPercent) < 0.01) return '0.00%';
         return `${diffPercent > 0 ? '+' : ''}${diffPercent.toFixed(2)}%`;
       };
 
+      const formatVal = (val, formatter) => {
+        if (val === undefined || val === null || isNaN(val)) return 'N/A';
+        return formatter(val);
+      };
+
+      const formatMs = (v) => `${v.toFixed(2)} ms`;
+      const formatThroughput = (v) => `${v.toFixed(2)} req/sec`;
+      const formatFail = (v) => `${(v * 100).toFixed(2)}%`;
+
+      const diffFailStr = () => {
+        if (currFail === undefined || currFail === null || baseFail === undefined || baseFail === null) return 'N/A';
+        if (currFail === baseFail) return '0.00%';
+        const diffVal = (currFail - baseFail) * 100;
+        return `${diffVal > 0 ? '+' : ''}${diffVal.toFixed(2)}%`;
+      };
+
       comparisonMd = `
 ### 📊 Baseline Comparison
-Compared against baseline established on **${baseline.metadata.timestamp}**:
+Compared against baseline established on **${baseline.metadata ? baseline.metadata.timestamp : 'unknown'}**:
 
 | Metric | Current Run | Baseline | Difference | Status |
 | :--- | :---: | :---: | :---: | :---: |
-| **p95 Latency** | ${current.metrics.p95Latency.toFixed(2)} ms | ${baseline.metrics.p95Latency.toFixed(2)} ms | ${formatDiff(p95Comp.diffPercent)} | ${getStatusEmoji(p95Comp.status)} |
-| **p99 Latency** | ${current.metrics.p99Latency.toFixed(2)} ms | ${baseline.metrics.p99Latency.toFixed(2)} ms | ${formatDiff(p99Comp.diffPercent)} | ${getStatusEmoji(p99Comp.status)} |
-| **Throughput** | ${current.metrics.throughput.toFixed(2)} req/sec | ${baseline.metrics.throughput.toFixed(2)} req/sec | ${formatDiff(throughputComp.diffPercent)} | ${getStatusEmoji(throughputComp.status)} |
-| **Failure Rate** | ${(current.metrics.failureRate * 100).toFixed(2)}% | ${(baseline.metrics.failureRate * 100).toFixed(2)}% | ${current.metrics.failureRate === baseline.metrics.failureRate ? '0.00%' : (current.metrics.failureRate - baseline.metrics.failureRate > 0 ? '+' : '') + ((current.metrics.failureRate - baseline.metrics.failureRate) * 100).toFixed(2) + '%'} | ${getStatusEmoji(failComp.status)} |
+| **p95 Latency** | ${formatVal(currP95, formatMs)} | ${formatVal(baseP95, formatMs)} | ${formatDiff(p95Comp.diffPercent)} | ${getStatusEmoji(p95Comp.status)} |
+| **p99 Latency** | ${formatVal(currP99, formatMs)} | ${formatVal(baseP99, formatMs)} | ${formatDiff(p99Comp.diffPercent)} | ${getStatusEmoji(p99Comp.status)} |
+| **Throughput** | ${formatVal(currThroughput, formatThroughput)} | ${formatVal(baseThroughput, formatThroughput)} | ${formatDiff(throughputComp.diffPercent)} | ${getStatusEmoji(throughputComp.status)} |
+| **Failure Rate** | ${formatVal(currFail, formatFail)} | ${formatVal(baseFail, formatFail)} | ${diffFailStr()} | ${getStatusEmoji(failComp.status)} |
 `;
     }
   } catch (e) {
@@ -115,13 +167,13 @@ Compared against baseline established on **${baseline.metadata.timestamp}**:
 `;
   }
 } else {
-  console.log(`[Pulse Comparison] No baseline file found for target "${target}" (scenario: "${scenario}").`);
+  console.log(`[Pulse Comparison] No baseline file found for target "${target}" (environment: "${environment}", scenario: "${scenario}").`);
   comparisonMd = `
 ### ℹ️ Baseline Comparison
-- **No baseline file found** for target \`${target}\` and scenario \`${scenario}\`.
+- **No baseline file found** for target \`${target}\`, environment \`${environment}\`, and scenario \`${scenario}\`.
 - To establish a baseline, copy this run's JSON report into the baselines folder:
   \`\`\`bash
-  copy k6\\reports\\performance_report.json k6\\baselines\\${target}_${scenario}_baseline.json
+  copy k6\\reports\\performance_report.json k6\\baselines\\${target}_${environment}_${scenario}_baseline.json
   \`\`\`
 `;
 }
