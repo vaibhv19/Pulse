@@ -32,7 +32,12 @@ export function runSmokeTest(config) {
   const url = buildUrl(config.baseUrl, healthEndpoint.path);
   
   const res = http.request(healthEndpoint.method, url, null, {
-    tags: { name: `health-${config.targetId}` }
+    tags: {
+      name: `${config.targetId}-smoke-health`,
+      endpoint: 'health',
+      target: config.targetId,
+      scenario: 'smoke_test'
+    }
   });
 
   check(res, {
