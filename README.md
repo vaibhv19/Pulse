@@ -18,8 +18,12 @@ Pulse/
 ├── docker/
 │   ├── grafana/
 │   │   └── provisioning/
-│   │       └── datasources/
-│   │           └── influxdb.yml # Pre-configures InfluxDB data source in Grafana
+│   │       ├── datasources/
+│   │       │   └── influxdb.yml # Pre-configures InfluxDB data source in Grafana
+│   │       └── dashboards/
+│   │           ├── dashboards.yml # Automatically provisions Pulse dashboards
+│   │           └── files/
+│   │               └── pulse_dashboard.json # Pre-configured Pulse Performance Dashboard
 │   └── docker-compose.yml       # InfluxDB + Grafana + on-demand k6 setup
 ├── k6/
 │   ├── config/
@@ -66,6 +70,35 @@ Pulse uses an environment-aware target configuration strategy. To resolve the fi
 
 ---
 
+## Metrics & Observability Dashboard
+
+When k6 runs inside Docker Compose, it streams telemetry to InfluxDB. Grafana reads this datasource and visualizes performance via an automatically provisioned dashboard.
+
+### Core Metrics Tracked
+
+1. **Latency Percentiles:** Graphing the median (p50), tail (p95), and peak (p99) response times over time.
+2. **Request Throughput:** Number of processed requests per second.
+3. **Error / Failure Rate:** Graphing the percentage of failed requests over time.
+4. **Virtual User Concurrency:** The ramping active VU levels.
+5. **Execution Volume Cards:** Summary KPIs displaying Total Requests, Error Rate, and Max VUs.
+
+### Dashboard Variables and Filtering
+
+The Pulse dashboard features dropdown filters at the top:
+- **Target:** Filter by `phoenix` or `trajectory`.
+- **Environment:** Filter by environment (e.g., `local`, `staging`).
+- **Scenario:** Filter by run class (`smoke_test`, `load_test`, `stress_test`, `recovery_test`).
+
+### Run Telemetry Tagging
+
+Every request metric is tagged automatically by k6 with metadata:
+- `target`: Mapped from targets config.
+- `environment`: Inherited from the config target environment.
+- `scenario`: Resolves the run scenario.
+- `endpoint`: Resolves the resource label.
+
+---
+
 ## Centralized Performance Budgets
 
 Performance budgets define latency and failure constraints for targets and scenarios. They are defined centrally in [budgets.js](k6/config/budgets.js) to avoid duplication.
@@ -90,34 +123,6 @@ When a scenario is launched, configuration parameters and budgets are resolved i
 4. **Environment-Specific Budget Overrides**: Custom budgets specified for the active environment (e.g. `staging`) inside `budgets.js`.
 5. **Runtime Overrides**: Values supplied via environment variables (`__ENV`) take absolute priority.
 
-### Overrides via Environment Variables
-
-You can override resolved config and budget values at runtime:
-- `PULSE_ENV`: Target environment (default: `local`)
-- `PULSE_TARGET`: Target API (e.g., `phoenix`, `trajectory`) — **Must be explicitly provided**
-- `PULSE_SCENARIO`: Scenario selector (`load`, `smoke`, `stress`, default: `load`)
-- `PULSE_TARGET_URL`: Overrides resolved base URL
-- `PULSE_VUS`: Overrides Virtual User (VU) count
-- `PULSE_DURATION`: Overrides execution duration (for smoke tests)
-- `PULSE_RAMP_UP`/`PULSE_HOLD`/`PULSE_RAMP_DOWN`: Overrides load profile durations
-- `PULSE_BUDGET_LATENCY`: Overrides performance budget p95 latency limit in ms (e.g., `500` for 500ms)
-- `PULSE_BUDGET_FAILURES`: Overrides maximum failure rate (e.g., `0.05` for 5% limit)
-- `PULSE_STRESS_MAX_VUS`: Overrides stress testing max concurrent VUs (e.g. `20`)
-- `PULSE_STRESS_STEP_DURATION`: Overrides stress testing step duration (e.g. `'10s'`)
-- `PULSE_STRESS_STAGES_COUNT`: Overrides stress step stages count (e.g. `4`)
-- `PULSE_STRESS_HOLD`: Overrides stress hold duration (e.g. `'30s'`)
-- `PULSE_STRESS_RAMP_DOWN`: Overrides stress ramp down duration (e.g. `'10s'`)
-
----
-
-## Stress & Resilience Testing Workflow
-
-When running in stress mode (`PULSE_SCENARIO=stress`), Pulse automatically orchestrates:
-1. **Escalating Step-stages**: The framework escalates active Virtual Users progressively (e.g., local default: 1 VU -> 2 VUs -> 3 VUs -> 4 VUs) over multiple steps.
-2. **Hold Stage**: Sustains maximum concurrent user pressure for a defined period to check for degradation.
-3. **Ramp-down**: Smoothly terminates VUs to 0.
-4. **Post-Stress Recovery Check**: Once stress load drops to 0, k6 dynamically schedules and launches a secondary single-iteration scenario (`recovery_test`) to verify if the API target has recovered, returns HTTP `200 OK`, and is responsive.
-
 ---
 
 ## Getting Started (Local Setup & Startup Order)
@@ -132,7 +137,15 @@ Run the following command from the root of the repository to start **InfluxDB** 
 docker compose -f docker/docker-compose.yml up -d influxdb grafana
 ```
 
-### Step 2: Run Gated Paths & Scenarios
+This will automatically configure InfluxDB and provision the **Pulse Performance Dashboard**.
+
+### Step 2: Open Grafana
+
+1. Navigate to [http://localhost:3000](http://localhost:3000) in your browser.
+2. Sign in with credentials (Username: `admin`, Password: `admin`).
+3. Under the **Dashboards** menu, locate the **Pulse** folder and open the **Pulse Performance Dashboard**.
+
+### Step 3: Run Performance Test Scenarios
 
 #### Load Test Scenario (Passing Path)
 
@@ -142,33 +155,19 @@ docker compose -f docker/docker-compose.yml run --rm k6
 
 #### Stress Test Scenario
 
-To run the progressive stress and resilience recovery validation flow against the default target (`phoenix` on `test.k6.io`):
-
 ```bash
 docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=stress k6
 ```
 
-#### Stress Test Override Configuration (Failing Path validation)
+As soon as a test runs, select **Last 5 minutes** or **Last 15 minutes** with a **5s refresh rate** in Grafana to see real-time performance graphs.
 
-To test catastrophic crash bounds or stress thresholds fail-fast checks:
+### Step 4: Tear Down Infrastructure & Metrics Lifecycle
 
-```bash
-# Force latency gate failure during stress run
-docker compose -f docker/docker-compose.yml run --rm -e PULSE_SCENARIO=stress -e PULSE_BUDGET_LATENCY=5 k6
-```
-
-If a threshold is crossed, the execution will output a warning and exit with a non-zero code.
-
-### Step 3: Inspect Diagnostics Summaries
-
-At the end of each run, k6 generates two summary files inside the `k6/` directory:
-- `summary.json`: Detailed machine-readable JSON summary of metrics and thresholds evaluation.
-- `summary.txt`: Human-readable console text summary.
-
-### Step 4: Tear Down Infrastructure
-
-To stop and remove all local containers and volumes:
-
-```bash
-docker compose -f docker/docker-compose.yml down -v
-```
+- **Normal Shutdown:** Stops and removes docker containers while *preserving* InfluxDB historical metrics:
+  ```bash
+  docker compose -f docker/docker-compose.yml down
+  ```
+- **Reset Environment (Wipe Metrics):** Stops containers and *destroys* InfluxDB/Grafana volumes to completely clear history:
+  ```bash
+  docker compose -f docker/docker-compose.yml down -v
+  ```
